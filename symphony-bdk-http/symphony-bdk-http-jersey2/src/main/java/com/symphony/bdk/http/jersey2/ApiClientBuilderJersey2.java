@@ -17,6 +17,12 @@ import org.glassfish.jersey.client.HttpUrlConnectorProvider;
 import org.glassfish.jersey.jackson.JacksonFeature;
 import org.glassfish.jersey.media.multipart.MultiPartFeature;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.CertificateException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -33,6 +39,8 @@ import javax.ws.rs.client.ClientBuilder;
  */
 @API(status = API.Status.STABLE)
 public class ApiClientBuilderJersey2 implements ApiClientBuilder {
+
+  private static final String TRUSTSTORE_FORMAT = "JKS";
 
   protected String basePath;
   protected byte[] keyStoreBytes;
@@ -203,6 +211,8 @@ public class ApiClientBuilderJersey2 implements ApiClientBuilder {
     if (this.proxyUrl != null) {
       this.configureProxy(clientConfig);
     }
+
+    clientConfig.register(ApiClientJersey2RequestLogFilter.class);
     clientConfig.register(MultiPartFeature.class);
     clientConfig.property(HttpUrlConnectorProvider.SET_METHOD_WORKAROUND, true);
     // turn off compliance validation to be able to send payloads with DELETE calls
@@ -246,9 +256,18 @@ public class ApiClientBuilderJersey2 implements ApiClientBuilder {
           .keyStorePassword(keyStorePassword);
     }
     try {
-      return sslConfig.createSSLContext();
-    } catch (IllegalStateException e) {
-        throw new IllegalStateException(e.getCause().getMessage(), e);
+      SSLContext sslContext = sslConfig.createSSLContext();
+
+      if (isNotEmpty(trustStoreBytes) && isNotEmpty(trustStorePassword)) {
+        final KeyStore truststore = KeyStore.getInstance(TRUSTSTORE_FORMAT);
+        truststore.load(new ByteArrayInputStream(trustStoreBytes), trustStorePassword.toCharArray());
+        ApiUtils.logTrustStore(truststore);
+      }
+
+      return sslContext;
+    } catch (IllegalStateException | KeyStoreException | IOException | NoSuchAlgorithmException | CertificateException e) {
+      throw new IllegalStateException(e.getCause().getMessage(), e);
     }
   }
+
 }

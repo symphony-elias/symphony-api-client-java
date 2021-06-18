@@ -11,8 +11,11 @@ import com.symphony.bdk.core.retry.RetryWithRecoveryBuilder;
 import com.symphony.bdk.core.service.datafeed.DatafeedIdRepository;
 import com.symphony.bdk.core.service.datafeed.exception.NestedRetryException;
 import com.symphony.bdk.gen.api.DatafeedApi;
+import com.symphony.bdk.gen.api.model.UserV2;
 import com.symphony.bdk.gen.api.model.V4Event;
 import com.symphony.bdk.http.api.ApiException;
+
+import com.symphony.bdk.http.api.tracing.DistributedTracingContext;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apiguardian.api.API;
@@ -49,13 +52,13 @@ public class DatafeedLoopV1 extends AbstractDatafeedLoop {
   private final DatafeedIdRepository datafeedRepository;
   private String datafeedId;
 
-  public DatafeedLoopV1(DatafeedApi datafeedApi, AuthSession authSession, BdkConfig config) {
-    this(datafeedApi, authSession, config, new OnDiskDatafeedIdRepository(config));
+  public DatafeedLoopV1(DatafeedApi datafeedApi, AuthSession authSession, BdkConfig config, UserV2 botInfo) {
+    this(datafeedApi, authSession, config, botInfo, new OnDiskDatafeedIdRepository(config));
   }
 
-  public DatafeedLoopV1(DatafeedApi datafeedApi, AuthSession authSession, BdkConfig config,
+  public DatafeedLoopV1(DatafeedApi datafeedApi, AuthSession authSession, BdkConfig config, UserV2 botInfo,
       DatafeedIdRepository repository) {
-    super(datafeedApi, authSession, config);
+    super(datafeedApi, authSession, config, botInfo);
 
     this.started.set(false);
     this.datafeedRepository = repository;
@@ -78,6 +81,10 @@ public class DatafeedLoopV1 extends AbstractDatafeedLoop {
       throw new IllegalStateException("The datafeed service is already started");
     }
 
+    if (!DistributedTracingContext.hasTraceId()) {
+      DistributedTracingContext.setTraceId();
+    }
+
     try {
       this.datafeedId = this.datafeedId == null ? this.createDatafeed() : this.datafeedId;
       log.debug("Start reading events from datafeed {}", datafeedId);
@@ -89,6 +96,8 @@ public class DatafeedLoopV1 extends AbstractDatafeedLoop {
       throw exception;
     } catch (Throwable throwable) {
       log.error(networkIssueMessageError(throwable, datafeedApi.getApiClient().getBasePath()) + "\n" + throwable);
+    } finally {
+      DistributedTracingContext.clear();
     }
   }
 
@@ -106,7 +115,11 @@ public class DatafeedLoopV1 extends AbstractDatafeedLoop {
         datafeedApi.v4DatafeedIdReadGet(datafeedId, authSession.getSessionToken(), authSession.getKeyManagerToken(),
             null);
     if (events != null && !events.isEmpty()) {
-      handleV4EventList(events);
+      try {
+        handleV4EventList(events);
+      } catch (RequeueEventException e) {
+        log.warn("EventException is not supported for DFv1, events will not get re-queued", e);
+      }
     }
     return null;
   }

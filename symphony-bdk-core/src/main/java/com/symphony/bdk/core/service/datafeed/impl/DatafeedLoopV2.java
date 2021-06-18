@@ -10,15 +10,21 @@ import com.symphony.bdk.core.retry.RetryWithRecoveryBuilder;
 import com.symphony.bdk.core.service.datafeed.exception.NestedRetryException;
 import com.symphony.bdk.gen.api.DatafeedApi;
 import com.symphony.bdk.gen.api.model.AckId;
+import com.symphony.bdk.gen.api.model.UserV2;
 import com.symphony.bdk.gen.api.model.V4Event;
 import com.symphony.bdk.gen.api.model.V5Datafeed;
+import com.symphony.bdk.gen.api.model.V5DatafeedCreateBody;
 import com.symphony.bdk.gen.api.model.V5EventList;
 import com.symphony.bdk.http.api.ApiException;
+import com.symphony.bdk.http.api.tracing.DistributedTracingContext;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.time.StopWatch;
 import org.apiguardian.api.API;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -43,13 +49,26 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @API(status = API.Status.INTERNAL)
 public class DatafeedLoopV2 extends AbstractDatafeedLoop {
 
+  /**
+   * DFv2 API authorizes a maximum length for the tag parameter.
+   */
+  private static final int DATAFEED_TAG_MAX_LENGTH = 100;
+
+  /**
+   * Based on the DFv2 default visibility timeout, after which an event is re-queued.
+   */
+  private static final int EVENT_PROCESSING_MAX_DURATION_SECONDS = 30;
+
   private final AtomicBoolean started = new AtomicBoolean();
-  private final AckId ackId;
+  private AckId ackId;
+  private final String tag;
+
   private V5Datafeed datafeed;
 
-  public DatafeedLoopV2(DatafeedApi datafeedApi, AuthSession authSession, BdkConfig config) {
-    super(datafeedApi, authSession, config);
+  public DatafeedLoopV2(DatafeedApi datafeedApi, AuthSession authSession, BdkConfig config, UserV2 botInfo) {
+    super(datafeedApi, authSession, config, botInfo);
     this.ackId = new AckId().ackId("");
+    this.tag = StringUtils.truncate(bdkConfig.getBot().getUsername(), DATAFEED_TAG_MAX_LENGTH);
   }
 
   /**
@@ -60,6 +79,11 @@ public class DatafeedLoopV2 extends AbstractDatafeedLoop {
     if (this.started.get()) {
       throw new IllegalStateException("The datafeed service is already started");
     }
+
+    if (!DistributedTracingContext.hasTraceId()) {
+      DistributedTracingContext.setTraceId();
+    }
+
     try {
       this.datafeed = this.retrieveDatafeed();
       if (this.datafeed == null) {
@@ -73,7 +97,9 @@ public class DatafeedLoopV2 extends AbstractDatafeedLoop {
     } catch (AuthUnauthorizedException | ApiException | NestedRetryException exception) {
       throw exception;
     } catch (Throwable throwable) {
-      log.error(networkIssueMessageError(throwable,datafeedApi.getApiClient().getBasePath()) + "\n" + throwable);
+      log.error("{}\n{}", networkIssueMessageError(throwable, datafeedApi.getApiClient().getBasePath()), throwable);
+    } finally {
+      DistributedTracingContext.clear();
     }
   }
 
@@ -101,7 +127,8 @@ public class DatafeedLoopV2 extends AbstractDatafeedLoop {
   }
 
   private V5Datafeed tryCreateDatafeed() throws ApiException {
-    return this.datafeedApi.createDatafeed(authSession.getSessionToken(), authSession.getKeyManagerToken());
+    return this.datafeedApi.createDatafeed(authSession.getSessionToken(), authSession.getKeyManagerToken(),
+        new V5DatafeedCreateBody().tag(tag));
   }
 
   private V5Datafeed retrieveDatafeed() throws Throwable {
@@ -117,9 +144,10 @@ public class DatafeedLoopV2 extends AbstractDatafeedLoop {
 
   private V5Datafeed tryRetrieveDatafeed() throws ApiException {
     final List<V5Datafeed> datafeeds =
-        this.datafeedApi.listDatafeed(authSession.getSessionToken(), authSession.getKeyManagerToken());
+        this.datafeedApi.listDatafeed(authSession.getSessionToken(), authSession.getKeyManagerToken(), tag);
 
     if (!datafeeds.isEmpty()) {
+      // we expect bots to only use one datafeed
       return datafeeds.get(0);
     }
     return null;
@@ -144,10 +172,29 @@ public class DatafeedLoopV2 extends AbstractDatafeedLoop {
         authSession.getSessionToken(),
         authSession.getKeyManagerToken(),
         ackId);
-    this.ackId.setAckId(v5EventList.getAckId());
-    List<V4Event> events = v5EventList.getEvents();
-    if (events != null && !events.isEmpty()) {
-      this.handleV4EventList(events);
+    try {
+      List<V4Event> events = v5EventList.getEvents();
+      StopWatch stopWatch = StopWatch.createStarted();
+      if (events != null && !events.isEmpty()) {
+        this.handleV4EventList(events);
+      }
+      stopWatch.stop();
+
+      if (stopWatch.getTime(TimeUnit.SECONDS) > EVENT_PROCESSING_MAX_DURATION_SECONDS) {
+        log.warn("Events processing took longer than {} seconds, "
+                + "this might lead to events being re-queued in datafeed and re-dispatched."
+                + " You might want to consider processing the event in a separated thread if needed.",
+            EVENT_PROCESSING_MAX_DURATION_SECONDS);
+      }
+
+      // updates ack id so that on next call DFv2 knows that events have been processed
+      this.ackId = new AckId();
+      this.ackId.setAckId(v5EventList.getAckId());
+
+    } catch (Exception e) {
+      // can happen if developer explicitly raised a NoAckIdUpdateException in handleV4EventList
+      // we also catch all exceptions just to be extra careful and never break the DF loop
+      log.warn("Failed to process events, will not update ack id, events will be re-queued", e);
     }
     return null;
   }
