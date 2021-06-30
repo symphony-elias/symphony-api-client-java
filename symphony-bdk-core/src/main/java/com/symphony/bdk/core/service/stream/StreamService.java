@@ -97,7 +97,7 @@ public class StreamService implements OboStreamService, OboService<OboStreamServ
   @Override
   public V2StreamAttributes getStream(@Nonnull String streamId) {
     return executeAndRetry("getStreamInfo", streamsApi.getApiClient().getBasePath(),
-        () -> streamsApi.v2StreamsSidInfoGet(streamId, authSession.getSessionToken()));
+        () -> streamsApi.v2StreamsSidInfoGet(streamId, authSession.getSessionToken(), "Bearer 1234"));
   }
 
   /**

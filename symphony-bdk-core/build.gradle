@@ -75,7 +75,7 @@ def apiBaseUrl = "https://raw.githubusercontent.com/symphonyoss/symphony-api-spe
 def generatedFolder = "$buildDir/generated/openapi"
 def apisToGenerate = [
         Agent: 'agent/agent-api-public.yaml',
-        Pod  : 'pod/pod-api-public-deprecated.yaml',
+        //Pod  : 'pod/pod-api-public-deprecated.yaml',
         Auth : 'authenticator/authenticator-api-public.yaml',
         Login: 'login/login-api-public.yaml',
 ]
@@ -119,6 +119,34 @@ apisToGenerate.each { api, path ->
     sourcesJar.dependsOn downloadTask
     sourcesJar.dependsOn generateTask
 }
+
+def generatePodLocalTask = tasks.create(name: "generatePodLocal",
+        type: org.openapitools.generator.gradle.plugin.tasks.GenerateTask) {
+    generatorName = 'java'
+    library = 'jersey2'
+    outputDir = generatedFolder
+    inputSpec = "$projectDir/src/main/resources/pod-api-public-deprecated.yaml"
+    skipOverwrite = true
+    generateApiTests = false
+    generateModelTests = false
+    generateModelDocumentation = false
+    generateApiDocumentation = false
+    apiPackage = 'com.symphony.bdk.gen.api'
+    modelPackage = 'com.symphony.bdk.gen.api.model'
+    invokerPackage = 'com.symphony.bdk.http.api'
+    templateDir = "${rootDir}/templates"
+    globalProperties = [
+            models         : "",
+            apis           : "",
+            supportingFiles: "false"
+    ]
+    configOptions = [
+            dateLibrary: "java8"
+    ]
+}
+
+compileJava.dependsOn generatePodLocalTask
+sourcesJar.dependsOn generatePodLocalTask
 
 // Duplicated AuthRequest class, we need the one from auth API, so task order matters here
 tasks.generateAuth.dependsOn tasks.generateLogin
